@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
@@ -48,23 +49,58 @@ export default function Home() {
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8000/ws");
+    const globalObj = typeof window !== "undefined" ? (window as any) : {};
+    let ws: WebSocket;
+    if (globalObj.__ws && globalObj.__ws instanceof WebSocket) {
+      ws = globalObj.__ws;
+    } else {
+      ws = new WebSocket("ws://localhost:8000/ws");
+      globalObj.__ws = ws;
+    }
     wsRef.current = ws;
     ws.onopen = () => setStatus("connected");
     ws.onmessage = (ev) => {
       try {
-        const data = JSON.parse(ev.data) as Usage;
-        setHistory((prev) => [...prev.slice(-59), data]);
+        const data = JSON.parse(ev.data) as any;
+        if (data && typeof data === "object" && "error" in data) {
+          setAgentState("error");
+          return;
+        }
+        if (data && data.type === "batch" && data.data) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const first = Object.values<any>(data.data)[0];
+          if (first) {
+            const ut = first.user_time ?? 0;
+            const st = first.sys_time ?? 0;
+            const usage: Usage = {
+              ru_utime: { tv_sec: Math.floor(ut), tv_usec: Math.floor((ut % 1) * 1_000_000) },
+              ru_stime: { tv_sec: Math.floor(st), tv_usec: Math.floor((st % 1) * 1_000_000) },
+              ru_maxrss: first.max_rss_kb ?? 0,
+              ru_minflt: first.minor_page_faults ?? 0,
+              ru_majflt: first.major_page_faults ?? 0,
+              ts: data.ts ?? Date.now() / 1000,
+            };
+            setHistory((prev) => [...prev.slice(-59), usage]);
+            if (agentState === "thinking") setAgentState("streaming");
+          }
+          return;
+        }
+        // Fallback to prior single-usage format
+        const usage = data as Usage;
+        setHistory((prev) => [...prev.slice(-59), usage]);
         if (agentState === "thinking") setAgentState("streaming");
       } catch {}
     };
     ws.onerror = () => setStatus("error");
-    ws.onclose = () => setStatus("closed");
-    return () => {
-      ws.close();
-      wsRef.current = null;
+    ws.onclose = (ev) => {
+      setStatus("closed");
+      console.log("WS closed", ev.code, ev.reason);
     };
-  }, [agentState]);
+    return () => {
+      // Do not close: reuse singleton across StrictMode mounts
+      wsRef.current = ws;
+    };
+  }, []);
 
   const sendText = () => {
     if (!wsRef.current || status !== "connected") return;
