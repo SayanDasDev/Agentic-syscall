@@ -326,6 +326,11 @@ sudo make install
 
 File: `/etc/default/grub`
 
+
+```bash
+sudo nano /etc/default/grub
+````
+
 ```bash
 GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-60-generic"
 GRUB_TIMEOUT_STYLE=menu
