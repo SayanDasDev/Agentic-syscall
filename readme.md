@@ -244,12 +244,6 @@ Update GRUB after editing:
 sudo update-grub
 ```
 
-Reboot and boot up using the new kernel
-
-```bash
-sudo reboot
-```
-
 ## Install Essentials for Kernel Build
 
 ```bash
@@ -314,4 +308,10 @@ sudo make modules_install
 
 ```bash
 sudo make install
+```
+
+#### Reboot and boot up using the new kernel
+
+```bash
+sudo reboot
 ```
