@@ -17,7 +17,14 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart";
 import { Input } from "@/components/ui/input";
-import { Loader2 } from "lucide-react";
+import {
+  Mention,
+  MentionContent,
+  MentionInput,
+  MentionItem,
+} from "@/components/ui/mention";
+import { Textarea } from "@/components/ui/textarea";
+import { Copy, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   Area,
@@ -46,10 +53,18 @@ export default function Home() {
   const [agentState, setAgentState] = useState("idle");
   const [text, setText] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
+  const [processes, setProcesses] = useState<{ pid: number; name: string }[]>(
+    []
+  );
+  const [copiedPid, setCopiedPid] = useState<number | null>(null);
   const [machines, setMachines] = useState<{ name: string; url: string }[]>([
     {
       name: "M-nigo",
       url: "http://127.0.0.1:8003/",
+    },
+    {
+      name: "M-sayan",
+      url: "http://127.0.0.1:8002/",
     },
   ]);
   const [newName, setNewName] = useState("");
@@ -71,6 +86,22 @@ export default function Home() {
         const data = JSON.parse(ev.data) as any;
         if (data && typeof data === "object" && "error" in data) {
           setAgentState("error");
+          return;
+        }
+        if (data && data.type === "stopped") {
+          setAgentState("stopped");
+          return;
+        }
+        if (data && data.type === "processes") {
+          const list = Array.isArray(data.data) ? data.data : [];
+          setProcesses(
+            list.map((p: any) => ({
+              pid: Number(p.pid ?? 0),
+              name: String(p.name ?? ""),
+            }))
+          );
+          setHistory([]);
+          setAgentState("processes");
           return;
         }
         if (data && data.type === "usage" && data.data) {
@@ -119,10 +150,7 @@ export default function Home() {
           }
           return;
         }
-        // Fallback to prior single-usage format
-        const usage = data as Usage;
-        setHistory((prev) => [...prev.slice(-59), usage]);
-        if (agentState === "thinking") setAgentState("streaming");
+        return;
       } catch {}
     };
     ws.onerror = () => setStatus("error");
@@ -153,8 +181,12 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-screen flex-col items-center justify-between py-16 px-6 bg-white dark:bg-black sm:items-start">
+      <main className="flex min-h-screen w-full max-w-screen flex-col items-center justify-between py-8 px-6 bg-white dark:bg-black sm:items-start">
         <div className="mt-6 w-full space-y-6">
+          <h1 className="text-3xl text-center font-bold">
+            {" "}
+            🤖 Agentic Syscall
+          </h1>
           <div className="flex items-center justify-between">
             <div className="text-sm text-zinc-600 dark:text-zinc-400">
               WS: {status}
@@ -173,269 +205,351 @@ export default function Home() {
             </div>
           </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Control</CardTitle>
-              <CardDescription>
-                Describe cadence, e.g. {`"every 5 seconds for 10 samples"`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex gap-2">
-                <Input
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder="Type a command"
-                />
-                <Button onClick={sendText}>Send</Button>
-                <Button variant="secondary" onClick={stopStreaming}>
-                  Stop
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Machines</CardTitle>
-              <CardDescription>
-                Provide machine name and URL for agent selection
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-col gap-3">
-                {machines.map((m, idx) => (
-                  <div key={`${m.name}-${idx}`} className="flex gap-2">
-                    <Input
-                      value={m.name}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setMachines((prev) =>
-                          prev.map((pm, i) =>
-                            i === idx ? { ...pm, name: v } : pm
-                          )
-                        );
-                      }}
-                      placeholder="Machine name"
-                    />
-                    <Input
-                      value={m.url}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setMachines((prev) =>
-                          prev.map((pm, i) =>
-                            i === idx ? { ...pm, url: v } : pm
-                          )
-                        );
-                      }}
-                      placeholder="URL (host:port)"
-                    />
-                    <Button
-                      variant="outline"
-                      onClick={() =>
-                        setMachines((prev) => prev.filter((_, i) => i !== idx))
-                      }
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                ))}
-                <div className="flex gap-2">
-                  <Input
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    placeholder="Machine name"
-                  />
-                  <Input
-                    value={newUrl}
-                    onChange={(e) => setNewUrl(e.target.value)}
-                    placeholder="URL (host:port)"
-                  />
-                  <Button
-                    onClick={() => {
-                      const nn = newName.trim();
-                      const nu = newUrl.trim();
-                      if (!nn || !nu) return;
-                      setMachines((prev) => [...prev, { name: nn, url: nu }]);
-                      setNewName("");
-                      setNewUrl("");
-                    }}
-                  >
-                    Add machine
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Stats */}
-          <div className="grid gap-6 md:grid-cols-3">
-            <Card>
-              <CardHeader>
-                <CardTitle>Current User CPU</CardTitle>
-                <CardDescription>seconds</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">
-                  {history.length
-                    ? (
-                        history[history.length - 1].ru_utime.tv_sec +
-                        history[history.length - 1].ru_utime.tv_usec / 1_000_000
-                      ).toFixed(3)
-                    : "-"}
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Current System CPU</CardTitle>
-                <CardDescription>seconds</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">
-                  {history.length
-                    ? (
-                        history[history.length - 1].ru_stime.tv_sec +
-                        history[history.length - 1].ru_stime.tv_usec / 1_000_000
-                      ).toFixed(3)
-                    : "-"}
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Current RSS</CardTitle>
-                <CardDescription>KB</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">
-                  {history.length
-                    ? history[history.length - 1].ru_maxrss.toLocaleString()
-                    : "-"}
-                </div>
-              </CardContent>
-            </Card>
-          </div>
           <div className="grid gap-6 md:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>CPU Time</CardTitle>
-                <CardDescription>User/System seconds over time</CardDescription>
+                <CardTitle>Control</CardTitle>
+                <CardDescription>
+                  Describe cadence, e.g. {`"every 5 seconds for 10 samples"`}
+                </CardDescription>
               </CardHeader>
               <CardContent>
-                <ChartContainer
-                  config={{
-                    user: { label: "User", color: "hsl(220 90% 56%)" },
-                    system: { label: "System", color: "hsl(10 85% 52%)" },
-                  }}
+                <Mention
+                  trigger="@"
+                  className="w-full"
+                  inputValue={text}
+                  onInputValueChange={(val) => setText(val)}
                 >
-                  <LineChart
-                    data={history.map((h) => ({
-                      ts: h.ts,
-                      user: h.ru_utime.tv_sec + h.ru_utime.tv_usec / 1_000_000,
-                      system:
-                        h.ru_stime.tv_sec + h.ru_stime.tv_usec / 1_000_000,
-                    }))}
+                  <MentionInput
+                    // value={text}
+                    placeholder="Type a command. Type @ to mention a machine."
+                    // onChange={(e) => setText(e.target.value)}
+                    asChild
                   >
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis
-                      dataKey="ts"
-                      tickFormatter={(t) =>
-                        new Date(t * 1000).toLocaleTimeString()
-                      }
-                    />
-                    <YAxis />
-                    <ChartTooltip content={<ChartTooltipContent />} />
-                    <Line
-                      type="monotone"
-                      dataKey="user"
-                      stroke="var(--color-user)"
-                      dot={false}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="system"
-                      stroke="var(--color-system)"
-                      dot={false}
-                    />
-                    <ChartLegend content={<ChartLegendContent />} />
-                  </LineChart>
-                </ChartContainer>
+                    <Textarea rows={3} />
+                  </MentionInput>
+                  <MentionContent>
+                    {machines.map((machine) => (
+                      <MentionItem
+                        key={machine.name}
+                        value={machine.name}
+                        className="flex-col items-start gap-0.5"
+                      >
+                        <span className="text-sm">{machine.name}</span>
+                        <span className="text-muted-foreground text-xs">
+                          {machine.url}
+                        </span>
+                      </MentionItem>
+                    ))}
+                  </MentionContent>
+                </Mention>
+                <div className="flex gap-2 mt-4">
+                  <Button onClick={sendText}>Send</Button>
+                  <Button variant="secondary" onClick={stopStreaming}>
+                    Stop
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 
-            {/* CPU Time Card */}
             <Card>
               <CardHeader>
-                <CardTitle>Memory RSS</CardTitle>
-                <CardDescription>Max RSS (KB) over time</CardDescription>
+                <CardTitle>Machines</CardTitle>
+                <CardDescription>
+                  Provide machine name and URL for agent selection
+                </CardDescription>
               </CardHeader>
               <CardContent>
-                <ChartContainer
-                  config={{
-                    rss: { label: "Max RSS", color: "hsl(140 70% 40%)" },
-                  }}
-                >
-                  <AreaChart
-                    data={history.map((h) => ({ ts: h.ts, rss: h.ru_maxrss }))}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis
-                      dataKey="ts"
-                      tickFormatter={(t) =>
-                        new Date(t * 1000).toLocaleTimeString()
-                      }
+                <div className="flex flex-col gap-3">
+                  {machines.map((m, idx) => (
+                    <div key={`${m.name}-${idx}`} className="flex gap-2">
+                      <Input
+                        value={m.name}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setMachines((prev) =>
+                            prev.map((pm, i) =>
+                              i === idx ? { ...pm, name: v } : pm
+                            )
+                          );
+                        }}
+                        placeholder="Machine name"
+                      />
+                      <Input
+                        value={m.url}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setMachines((prev) =>
+                            prev.map((pm, i) =>
+                              i === idx ? { ...pm, url: v } : pm
+                            )
+                          );
+                        }}
+                        placeholder="URL (host:port)"
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          setMachines((prev) =>
+                            prev.filter((_, i) => i !== idx)
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                  <div className="flex gap-2">
+                    <Input
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      placeholder="Machine name"
                     />
-                    <YAxis />
-                    <ChartTooltip content={<ChartTooltipContent />} />
-                    <Area
-                      type="monotone"
-                      dataKey="rss"
-                      stroke="var(--color-rss)"
-                      fill="var(--color-rss)"
+                    <Input
+                      value={newUrl}
+                      onChange={(e) => setNewUrl(e.target.value)}
+                      placeholder="URL (host:port)"
                     />
-                  </AreaChart>
-                </ChartContainer>
+                    <Button
+                      onClick={() => {
+                        const nn = newName.trim();
+                        const nu = newUrl.trim();
+                        if (!nn || !nu) return;
+                        setMachines((prev) => [...prev, { name: nn, url: nu }]);
+                        setNewName("");
+                        setNewUrl("");
+                      }}
+                    >
+                      Add machine
+                    </Button>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </div>
+          {/* Stats */}
+          {agentState === "thinking" && history.length > 0 && (
+            <div className="grid gap-6 md:grid-cols-3">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Current User CPU</CardTitle>
+                  <CardDescription>seconds</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">
+                    {(
+                      history[history.length - 1].ru_utime.tv_sec +
+                      history[history.length - 1].ru_utime.tv_usec / 1_000_000
+                    ).toFixed(3)}
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Current System CPU</CardTitle>
+                  <CardDescription>seconds</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">
+                    {(
+                      history[history.length - 1].ru_stime.tv_sec +
+                      history[history.length - 1].ru_stime.tv_usec / 1_000_000
+                    ).toFixed(3)}
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Current RSS</CardTitle>
+                  <CardDescription>KB</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">
+                    {history[history.length - 1].ru_maxrss.toLocaleString()}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+          {agentState === "thinking" && history.length > 0 && (
+            <div className="grid gap-6 md:grid-cols-3">
+              <Card>
+                <CardHeader>
+                  <CardTitle>CPU Time</CardTitle>
+                  <CardDescription>
+                    User/System seconds over time
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ChartContainer
+                    config={{
+                      user: { label: "User", color: "hsl(220 90% 56%)" },
+                      system: { label: "System", color: "hsl(10 85% 52%)" },
+                    }}
+                  >
+                    <LineChart
+                      data={history.map((h) => ({
+                        ts: h.ts,
+                        user:
+                          h.ru_utime.tv_sec + h.ru_utime.tv_usec / 1_000_000,
+                        system:
+                          h.ru_stime.tv_sec + h.ru_stime.tv_usec / 1_000_000,
+                      }))}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="ts"
+                        tickFormatter={(t) =>
+                          new Date(t * 1000).toLocaleTimeString()
+                        }
+                      />
+                      <YAxis />
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                      <Line
+                        type="monotone"
+                        dataKey="user"
+                        stroke="var(--color-user)"
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="system"
+                        stroke="var(--color-system)"
+                        dot={false}
+                      />
+                      <ChartLegend content={<ChartLegendContent />} />
+                    </LineChart>
+                  </ChartContainer>
+                </CardContent>
+              </Card>
 
-          {/* Page Fault Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Page Faults</CardTitle>
-              <CardDescription>Minor vs Major faults</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ChartContainer
-                config={{
-                  minflt: { label: "Minor", color: "hsl(40 90% 50%)" },
-                  majflt: { label: "Major", color: "hsl(300 70% 55%)" },
-                }}
-              >
-                <BarChart
-                  data={history.map((h) => ({
-                    ts: h.ts,
-                    minflt: h.ru_minflt,
-                    majflt: h.ru_majflt,
-                  }))}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="ts"
-                    tickFormatter={(t) =>
-                      new Date(t * 1000).toLocaleTimeString()
-                    }
-                  />
-                  <YAxis />
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="minflt" fill="var(--color-minflt)" />
-                  <Bar dataKey="majflt" fill="var(--color-majflt)" />
-                  <ChartLegend content={<ChartLegendContent />} />
-                </BarChart>
-              </ChartContainer>
-            </CardContent>
-          </Card>
+              {/* CPU Time Card */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Memory RSS</CardTitle>
+                  <CardDescription>Max RSS (KB) over time</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ChartContainer
+                    config={{
+                      rss: { label: "Max RSS", color: "hsl(140 70% 40%)" },
+                    }}
+                  >
+                    <AreaChart
+                      data={history.map((h) => ({
+                        ts: h.ts,
+                        rss: h.ru_maxrss,
+                      }))}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="ts"
+                        tickFormatter={(t) =>
+                          new Date(t * 1000).toLocaleTimeString()
+                        }
+                      />
+                      <YAxis />
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                      <Area
+                        type="monotone"
+                        dataKey="rss"
+                        stroke="var(--color-rss)"
+                        fill="var(--color-rss)"
+                      />
+                    </AreaChart>
+                  </ChartContainer>
+                </CardContent>
+              </Card>
+
+              {/* Page Fault Card */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Page Faults</CardTitle>
+                  <CardDescription>Minor vs Major faults</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ChartContainer
+                    config={{
+                      minflt: { label: "Minor", color: "hsl(40 90% 50%)" },
+                      majflt: { label: "Major", color: "hsl(300 70% 55%)" },
+                    }}
+                  >
+                    <BarChart
+                      data={history.map((h) => ({
+                        ts: h.ts,
+                        minflt: h.ru_minflt,
+                        majflt: h.ru_majflt,
+                      }))}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="ts"
+                        tickFormatter={(t) =>
+                          new Date(t * 1000).toLocaleTimeString()
+                        }
+                      />
+                      <YAxis />
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                      <Bar dataKey="minflt" fill="var(--color-minflt)" />
+                      <Bar dataKey="majflt" fill="var(--color-majflt)" />
+                      <ChartLegend content={<ChartLegendContent />} />
+                    </BarChart>
+                  </ChartContainer>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+          {agentState === "processes" && (
+            <div className="grid gap-6 md:grid-cols-1">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Processes</CardTitle>
+                  <CardDescription>PID and Name</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-3 gap-3">
+                    {processes.length === 0 ? (
+                      <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                        No processes
+                      </div>
+                    ) : (
+                      processes.map((p) => (
+                        <div
+                          key={`${p.pid}-${p.name}`}
+                          className="flex items-center justify-between rounded-md border px-3 py-2"
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium">
+                              {p.name}
+                            </span>
+                            <div className="mt-1">
+                              <Badge variant="outline">PID {p.pid}</Badge>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {copiedPid === p.pid && (
+                              <Badge variant="secondary">copied</Badge>
+                            )}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                navigator.clipboard.writeText(String(p.pid));
+                                setCopiedPid(p.pid);
+                                setTimeout(() => setCopiedPid(null), 1200);
+                              }}
+                            >
+                              <Copy className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
         </div>
       </main>
     </div>
