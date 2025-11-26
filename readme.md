@@ -4,6 +4,7 @@
 curl -O https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.17.9.tar.xz
 tar -xf linux-6.17.9.tar.xz
 rm linux-6.17.9.tar.xz
+cd linux-6.17.9
 ```
 
 ## Modify `kernel/sys.c`
