@@ -1,139 +1,141 @@
-"""
-This is the NEW "Agentic Brain" file.
-It uses LangGraph to define the NLU and routing logic.
-"""
+import logging
+import os
+import json
+import requests
+from typing import Literal
 
+from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, Dict, Any
 
-# Import your agent and tools
-from app.agent_nlu import parse_command_krutrim
-from app.tools import tool_list_processes
+from .tools import get_usage, list_processes, stop_agent
 
-# ==========================================================
-#  AGENT STATE
-# ==========================================================
+logger = logging.getLogger("backend_agentic.graph")
 
-class AgentState(TypedDict):
-    # The initial command from the user
-    command: str
-    
-    # The parsed command from the NLU
-    parsed_command: Dict
-    
-    # The final result to pass back to Streamlit
-    # This will be our "plan"
-    result: Dict[str, Any]
+class AgentState(BaseModel):
+    query: str
+    machines: list[dict]
+    result: list | dict | None = None
+    tool_name: str | None = None
+    tool_args: dict = Field(default_factory=dict)
 
-# ==========================================================
-#  LANGGRAPH NODES
-# ==========================================================
+class GetUsage(BaseModel):
+    machine_url: str = Field(..., description="URL")
+    pid: int = Field(..., description="PID")
+    interval: float | int | None = Field(default=None, description="seconds between samples")
+    samples: int | None = Field(default=None, description="number of samples")
 
-def node_nlu_parser(state: AgentState):
-    """
-    Node for Agent A (NLU): Parses the user's command.
-    """
-    command = state['command']
-    parsed = parse_command_krutrim(command)
-    return {"parsed_command": parsed}
+class ListProcesses(BaseModel):
+    machine_url: str = Field(..., description="URL")
+KRUTRIM_API_URL = "https://cloud.olakrutrim.com/v1/chat/completions"
+KRUTRIM_MODEL = "Qwen3-Next-80B-A3B-Instruct"
 
-def node_tool_list_processes(state: AgentState):
-    """
-    Node for Agent B: Calls the `ps -u` tool.
-    """
-    process_list_str = tool_list_processes()
-    result = {
-        "type": "list",
-        "data": process_list_str
-    }
-    return {"result": result}
+def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
+    return "tools"
 
-def node_plan_monitor(state: AgentState):
-    """
-    This node doesn't run a tool. It just creates the "plan"
-    for the Streamlit UI to execute.
-    """
-    pids = state['parsed_command'].get('pids', [])
-    interval = state['parsed_command'].get('interval', 1.0)
-    result = {
-        "type": "monitor",
-        "pids": pids,
-        "interval": interval
-    }
-    return {"result": result}
-
-def node_plan_stop(state: AgentState):
-    """
-    This node creates the "stop" plan.
-    """
-    return {"result": {"type": "stop"}}
-
-def node_handle_unknown(state: AgentState):
-    """
-    This node handles NLU failures.
-    """
-    message = state['parsed_command'].get('message', "I don't understand.")
-    return {"result": {"type": "error", "message": message}}
-
-# ==========================================================
-#  LANGGRAPH ROUTER
-# ==========================================================
-
-def router(state: AgentState):
-    """
-    Reads the NLU's intent and routes to the correct node.
-    """
-    intent = state['parsed_command'].get('intent')
-    print(f"[LangGraph Router] Got intent: '{intent}'. Routing...")
-    
-    if intent == "list_processes":
-        return "list_processes_tool"
-    elif intent == "monitor_pids":
-        return "monitor_plan"
-    elif intent == "stop_monitoring":
-        return "stop_plan"
-    else:
-        return "unknown"
-
-# ==========================================================
-#  BUILD AND COMPILE THE GRAPH
-# ==========================================================
-
-def build_graph():
-    """Builds and compiles the LangGraph."""
-    
-    workflow = StateGraph(AgentState)
-
-    # Add nodes
-    workflow.add_node("nlu_parser", node_nlu_parser)
-    workflow.add_node("list_processes_tool", node_tool_list_processes)
-    workflow.add_node("monitor_plan", node_plan_monitor)
-    workflow.add_node("stop_plan", node_plan_stop)
-    workflow.add_node("unknown", node_handle_unknown)
-
-    # Set the entrypoint
-    workflow.set_entry_point("nlu_parser")
-
-    # Add the conditional router
-    workflow.add_conditional_edges(
-        "nlu_parser",
-        router,
-        {
-            "list_processes_tool": "list_processes_tool",
-            "monitor_plan": "monitor_plan",
-            "stop_plan": "stop_plan",
-            "unknown": "unknown"
-        }
+def call_model(state: AgentState):
+    logger.info("🤖 Agent thinking | query=%s \n machines=%s", state.query, len(state.machines))
+    api_key = os.getenv("KRUTRIM_API_KEY")
+    logger.info("🔑 Krutrim API key present=%s", "yes" if api_key else "no")
+    sys_msg = (
+        "ROLE: Tool Router. "
+        "TOOLS: GetUsage, ListProcesses, Stop. "
+        "SCHEMA: "
+        "GetUsage {tool:\"GetUsage\", args:{machine_url:string(one of machines[].url), pid:int, interval?:number, samples?:number}}. "
+        "ListProcesses {tool:\"ListProcesses\", args:{machine_url:string(one of machines[].url)}}. "
+        "Stop {tool:\"Stop\", args:{}}. "
+        "MACHINES: " + json.dumps(state.machines) + ". "
+        "RULES: "
+        "1) Reply ONLY a JSON object exactly {\"tool\":\"<name>\",\"args\":{...}} with no prose. "
+        "2) When a specific process id is requested, choose GetUsage. If no interval/samples provided, omit them. "
+        "3) Map machine by name; set machine_url to that machine's url. If no name matches, use the first machine. "
+        "4) If the request is to list/show processes or no pid is specified, choose ListProcesses. "
+        "5) For stop/cancel/end, choose Stop. "
+        "EXAMPLES: "
+        "Monitor process id 123 on machine alpha -> {\"tool\":\"GetUsage\",\"args\":{\"machine_url\":\"http://127.0.0.1:8001\",\"pid\":123}} "
+        "Monitor id 123 every 2s for 3 samples -> {\"tool\":\"GetUsage\",\"args\":{\"machine_url\":\"http://127.0.0.1:8001\",\"pid\":123,\"interval\":2,\"samples\":3}} "
+        "list processes on beta -> {\"tool\":\"ListProcesses\",\"args\":{\"machine_url\":\"http://127.0.0.1:8001\"}} "
+        "stop -> {\"tool\":\"Stop\",\"args\":{}}"
     )
+    payload = {
+        "model": KRUTRIM_MODEL,
+        "messages": [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": state.query},
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"}
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}" if api_key else "",
+        "Content-Type": "application/json",
+    }
+    try:
+        logger.info("🤖 Calling Krutrim model=%s", KRUTRIM_MODEL)
+        r = requests.post(KRUTRIM_API_URL, headers=headers, json=payload, timeout=12)
+        data = r.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        logger.info("🤖 Krutrim status=%s", r.status_code)
+        logger.info("🤖 Krutrim raw content=%s", (content[:1000] + ("..." if len(content) > 1000 else "")))
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            parsed = {}
+            if "```" in content:
+                fence_start = content.find("```")
+                fence_end = content.find("```", fence_start + 3)
+                snippet = content[fence_start + 3:fence_end] if fence_end != -1 else content[fence_start + 3:]
+                brace_start = snippet.find("{")
+                brace_end = snippet.rfind("}")
+                if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+                    try:
+                        parsed = json.loads(snippet[brace_start:brace_end+1])
+                    except Exception:
+                        parsed = {}
+            if not parsed:
+                brace_start = content.find("{")
+                brace_end = content.rfind("}")
+                if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+                    try:
+                        parsed = json.loads(content[brace_start:brace_end+1])
+                    except Exception:
+                        parsed = {}
+        tool_name = parsed.get("tool")
+        tool_args = parsed.get("args", {})
+        logger.info("🤖 Agent Infers: tool=%s args=%s", tool_name, tool_args)
+        if tool_name:
+            return {"tool_name": tool_name, "tool_args": tool_args}
+        else:
+            logger.warning("⚠️ Krutrim call failed")
+            return {"tool_name": None, "tool_args": {}}
+    except Exception:
+        logger.warning("⚠️ Krutrim call failed")
+        return {"tool_name": None, "tool_args": {}}
 
-    # All tool/plan nodes go to the end
-    workflow.add_edge("list_processes_tool", END)
-    workflow.add_edge("monitor_plan", END)
-    workflow.add_edge("stop_plan", END)
-    workflow.add_edge("unknown", END)
+def call_tool(state: AgentState):
+    tool_name = state.tool_name
+    tool_args = state.tool_args or {}
+    if not tool_name:
+        return {"result": {"error": "no_tool"}}
+    logger.info("🤖 Agent decided to use tool: %s with args: %s", tool_name, tool_args)
+    if tool_name == "GetUsage":
+        result = get_usage(**tool_args)
+    elif tool_name == "ListProcesses":
+        result = list_processes(**tool_args)
+    elif tool_name == "Stop":
+        result = stop_agent()
+    else:
+        result = {"error": f"unknown_tool:{tool_name}"}
+    return {"result": result}
 
-    # Compile the graph
-    return workflow.compile()
 
-# --- Build the app and export it for main.py to use ---
-app = build_graph()
+workflow = StateGraph(AgentState)
+workflow.add_node("agent", call_model)
+workflow.add_node("tools", call_tool)
+workflow.set_entry_point("agent")
+workflow.add_conditional_edges(
+    "agent",
+    should_continue,
+)
+workflow.add_edge("tools", END)
+
+graph = workflow.compile()

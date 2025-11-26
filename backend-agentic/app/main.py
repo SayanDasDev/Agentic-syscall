@@ -4,8 +4,10 @@ import asyncio
 import time
 import logging
 import json
-import requests
-from .agent_nlu import parse_agentic_selection
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+from dotenv import load_dotenv
 
 app = FastAPI()
 
@@ -19,34 +21,37 @@ app.add_middleware(
     allow_methods=["*"]
 )
 
+# Load environment variables early
+def _load_env():
+    try:
+        base = Path(__file__).resolve().parents[2]
+        local = Path(__file__).resolve().parents[1]
+        p1 = base / ".env"
+        p2 = local / ".env"
+        if p1.exists():
+            load_dotenv(str(p1))
+        if p2.exists():
+            load_dotenv(str(p2))
+    except Exception:
+        pass
+
+_load_env()
+logger.info("🔑 KRUTRIM_API_KEY present=%s", "yes" if os.getenv("KRUTRIM_API_KEY") else "no")
+
+from .agent_graph import graph, call_model, AgentState
+from .tools import get_usage, list_processes
+
 @app.get("/")
 def root():
     return {"status": "ok"}
-
-def build_machine_url(u: str) -> str:
-    return u if u.startswith("http") else f"http://{u}"
 
 @app.post("/agent/query")
 def agent_query(payload: dict = Body(...)):
     query = str(payload.get("query", ""))
     machines = payload.get("machines", [])
-    logger.info("🤖 Agent thinking | query=%s machines=%s", query, len(machines))
-    sel = parse_agentic_selection(query, machines)
-    logger.info("🤖 Agent Infers: name=%s url=%s pid=%s interval=%s", sel.get("machine_name"), sel.get("machine_url"), sel.get("pid"), sel.get("interval"))
-    base = build_machine_url(str(sel.get("machine_url", "")))
-    if not base:
-        return {"error": "machine_url_missing", "selection": sel}
-    pid = int(sel.get("pid", 0))
-    try:
-        logger.info("➡️ Calling %s/usage?pid=%s", base, pid)
-        r = requests.get(f"{base}/usage", params={"pid": pid}, timeout=10)
-        r.raise_for_status()
-        usage = r.json()
-        logger.info("✅ Usage fetched status=%s", r.status_code)
-    except Exception:
-        logger.warning("⚠️ Usage fetch failed")
-        usage = None
-    return {"selection": sel, "usage": usage}
+    inputs = {"query": query, "machines": machines}
+    result = graph.invoke(inputs)
+    return {"result": result.get("result")}
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -69,36 +74,41 @@ async def ws_endpoint(ws: WebSocket):
                 continue
             query = str(payload.get("query", ""))
             machines = payload.get("machines", [])
-            logger.info("🤖 Agent thinking | query=%s machines=%s", query, len(machines))
-            sel = parse_agentic_selection(query, machines)
-            logger.info("🤖 Agent Infers: name=%s url=%s pid=%s interval=%s", sel.get("machine_name"), sel.get("machine_url"), sel.get("pid"), sel.get("interval"))
-            base = build_machine_url(str(sel.get("machine_url", "")))
-            if not base:
-                await ws.send_json({"error": "machine_url_missing", "selection": sel})
-                continue
-            pid = int(sel.get("pid", 0))
-            interval = float(sel.get("interval", 1.0))
-            async def loop():
-                logger.info("📡 Streaming every %ss from %s pid=%s", interval, base, pid)
-                while True:
-                    try:
-                        r = requests.get(f"{base}/usage", params={"pid": pid}, timeout=10)
-                        usage = r.json() if r.status_code == 200 else None
-                    except Exception:
-                        usage = None
-                    await ws.send_json({"ts": time.time(), "type": "usage", "selection": sel, "data": usage})
-                    await asyncio.sleep(interval)
-            if task and not task.done():
-                task.cancel()
-            if interval and interval > 0:
-                task = asyncio.create_task(loop())
+            state = AgentState(query=query, machines=machines)
+            decision = call_model(state)
+            tool = decision.get("tool_name")
+            args = decision.get("tool_args", {})
+            if tool == "GetUsage":
+                base_url = str(args.get("machine_url", ""))
+                pid = int(args.get("pid", 0))
+                interval = float(args.get("interval", 0)) if args.get("interval") is not None else 0.0
+                samples = int(args.get("samples", 1)) if args.get("samples") is not None else 1
+                async def loop_samples():
+                    count = 0
+                    while True:
+                        try:
+                            usage = get_usage(base_url, pid)
+                        except Exception:
+                            usage = None
+                        await ws.send_json({"ts": time.time(), "type": "usage", "data": usage})
+                        count += 1
+                        if samples and count >= samples:
+                            break
+                        await asyncio.sleep(interval if interval and interval > 0 else 0)
+                if task and not task.done():
+                    task.cancel()
+                task = asyncio.create_task(loop_samples())
+            elif tool == "ListProcesses":
+                base_url = str(args.get("machine_url", ""))
+                procs = list_processes(base_url)
+                await ws.send_json({"ts": time.time(), "type": "processes", "data": procs})
+            elif tool == "Stop":
+                if task and not task.done():
+                    task.cancel()
+                task = None
+                await ws.send_json({"type": "stopped"})
             else:
-                try:
-                    r = requests.get(f"{base}/usage", params={"pid": pid}, timeout=10)
-                    usage = r.json() if r.status_code == 200 else None
-                except Exception:
-                    usage = None
-                await ws.send_json({"ts": time.time(), "type": "usage", "selection": sel, "data": usage})
+                await ws.send_json({"error": "no_tool", "args": args})
     except WebSocketDisconnect:
         if task and not task.done():
             task.cancel()
