@@ -9,6 +9,9 @@ import sys
 import json
 import re
 from dotenv import load_dotenv
+import logging
+
+logger = logging.getLogger("backend_agentic.nlu")
 
 # --- Krutrim API Configuration ---
 
@@ -124,6 +127,7 @@ def parse_command_mock(user_input: str) -> dict:
     return {"intent": "unknown", "message": "I didn't understand. Try 'list processes' or 'monitor <pid>'."}
 
 def parse_agentic_selection(user_input: str, machines: list[dict]) -> dict:
+    logger.info("🤖 Agent thinking | query=%s machines=%s", user_input, len(machines))
     if not KRUTRIM_API_KEY:
         return parse_agentic_mock(user_input, machines)
     headers = {
@@ -159,8 +163,10 @@ def parse_agentic_selection(user_input: str, machines: list[dict]) -> dict:
                 murl = table[mname]
             parsed['machine_name'] = mname
             parsed['machine_url'] = murl
+        logger.info("🤖 Agent Infers: name=%s url=%s pid=%s interval=%s", parsed.get('machine_name'), parsed.get('machine_url'), parsed.get('pid'), parsed.get('interval'))
         return parsed
     except Exception:
+        logger.warning("⚠️ Agent NLU error; using mock")
         return parse_agentic_mock(user_input, machines)
 
 def parse_agentic_mock(user_input: str, machines: list[dict]) -> dict:
@@ -189,4 +195,6 @@ def parse_agentic_mock(user_input: str, machines: list[dict]) -> dict:
             chosen = name
             break
     url = name_to_url.get(chosen, '')
-    return {"machine_name": chosen, "machine_url": url, "pid": pid, "interval": interval}
+    result = {"machine_name": chosen, "machine_url": url, "pid": pid, "interval": interval}
+    logger.info("🤖 Agent Mock Infers: name=%s url=%s pid=%s interval=%s", chosen, url, pid, interval)
+    return result

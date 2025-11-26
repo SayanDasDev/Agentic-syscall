@@ -30,16 +30,21 @@ def build_machine_url(u: str) -> str:
 def agent_query(payload: dict = Body(...)):
     query = str(payload.get("query", ""))
     machines = payload.get("machines", [])
+    logger.info("🤖 Agent thinking | query=%s machines=%s", query, len(machines))
     sel = parse_agentic_selection(query, machines)
+    logger.info("🤖 Agent Infers: name=%s url=%s pid=%s interval=%s", sel.get("machine_name"), sel.get("machine_url"), sel.get("pid"), sel.get("interval"))
     base = build_machine_url(str(sel.get("machine_url", "")))
     if not base:
         return {"error": "machine_url_missing", "selection": sel}
     pid = int(sel.get("pid", 0))
     try:
+        logger.info("➡️ Calling %s/usage?pid=%s", base, pid)
         r = requests.get(f"{base}/usage", params={"pid": pid}, timeout=10)
         r.raise_for_status()
         usage = r.json()
+        logger.info("✅ Usage fetched status=%s", r.status_code)
     except Exception:
+        logger.warning("⚠️ Usage fetch failed")
         usage = None
     return {"selection": sel, "usage": usage}
 
@@ -59,11 +64,14 @@ async def ws_endpoint(ws: WebSocket):
                 if task and not task.done():
                     task.cancel()
                 task = None
+                logger.info("🛑 Agent stopped")
                 await ws.send_json({"type": "stopped"})
                 continue
             query = str(payload.get("query", ""))
             machines = payload.get("machines", [])
+            logger.info("🤖 Agent thinking | query=%s machines=%s", query, len(machines))
             sel = parse_agentic_selection(query, machines)
+            logger.info("🤖 Agent Infers: name=%s url=%s pid=%s interval=%s", sel.get("machine_name"), sel.get("machine_url"), sel.get("pid"), sel.get("interval"))
             base = build_machine_url(str(sel.get("machine_url", "")))
             if not base:
                 await ws.send_json({"error": "machine_url_missing", "selection": sel})
@@ -71,6 +79,7 @@ async def ws_endpoint(ws: WebSocket):
             pid = int(sel.get("pid", 0))
             interval = float(sel.get("interval", 1.0))
             async def loop():
+                logger.info("📡 Streaming every %ss from %s pid=%s", interval, base, pid)
                 while True:
                     try:
                         r = requests.get(f"{base}/usage", params={"pid": pid}, timeout=10)

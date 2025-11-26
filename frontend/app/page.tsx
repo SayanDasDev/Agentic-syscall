@@ -47,7 +47,14 @@ export default function Home() {
   const [agentState, setAgentState] = useState("idle");
   const [text, setText] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
-  const [machines, setMachines] = useState<{ name: string; url: string }[]>([]);
+  const [machines, setMachines] = useState<{ name: string; url: string }[]>([
+    { 
+      name: "M-nigo", url: "http://localhost:8003",
+     },
+    { 
+      name: "M-sayan", url: "http://localhost:8002",
+     },
+  ]);
   const [newName, setNewName] = useState("");
   const [newUrl, setNewUrl] = useState("");
 
