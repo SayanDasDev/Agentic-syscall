@@ -49,10 +49,7 @@ export default function Home() {
   const wsRef = useRef<WebSocket | null>(null);
   const [machines, setMachines] = useState<{ name: string; url: string }[]>([
     { 
-      name: "M-nigo", url: "http://localhost:8003",
-     },
-    { 
-      name: "M-sayan", url: "http://localhost:8002",
+      name: "M-nigo", url: "http://172.20.249.92:8003/",
      },
   ]);
   const [newName, setNewName] = useState("");
