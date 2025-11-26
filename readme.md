@@ -7,6 +7,12 @@ rm linux-6.17.9.tar.xz
 cd linux-6.17.9
 ```
 
+## Save the current working directory as an environment variable (for easy navigation)
+
+```bash
+export KERNEL_DIR=$(pwd)
+```
+
 ## Modify `kernel/sys.c`
 
 ```bash
@@ -104,7 +110,7 @@ static void __traverse_and_sum(struct task_struct *task, struct rusage *total, b
 
     sig = task->signal;
     if (sig) {
-        
+
         // 1. Add usage from the current thread group (process)
         signal_struct_to_rusage(&r, sig->utime, sig->stime, sig->maxrss,
                                 sig->min_flt, sig->maj_flt, sig->inblock,
@@ -134,7 +140,7 @@ static void __traverse_and_sum(struct task_struct *task, struct rusage *total, b
         }
     }
 
-    // 3. Recurse for all living children 
+    // 3. Recurse for all living children
     list_for_each_entry_rcu(child, &task->children, sibling) {
         __traverse_and_sum(child, total, log_enabled);
     }
@@ -159,9 +165,9 @@ SYSCALL_DEFINE3(get_proc_subtree_rusage, pid_t, pid, int, flags, struct rusage _
     long ret = 0;
 
     memset(&total_usage, 0, sizeof(total_usage));
-    
+
     rcu_read_lock();
-    
+
     p = find_task_by_vpid(pid);
     if (!p) {
         ret = -ESRCH; // No such process
@@ -186,156 +192,51 @@ out_unlock:
 }
 
 
-// --- System Call 2: Subtree Rusage with Log ---
-
-/**
- * sys_get_proc_subtree_rusage_log - Custom syscall to aggregate resource usage
- * and log the process contributions to the kernel ring buffer (dmesg).
- * @pid: The PID of the root process of the subtree.
- * @flags: Reserved for future use.
- * @log_flag: If non-zero, enables detailed printk logging.
- * @usage: The user-space pointer to a 'struct rusage' to fill.
- *
- * Returns 0 on success, or a negative errno on failure.
- */
-SYSCALL_DEFINE4(get_proc_subtree_rusage_log, pid_t, pid, int, flags, int, log_flag, struct rusage __user *, usage)
-{
-    struct rusage total_usage;
-    struct task_struct *p;
-    long ret = 0;
-    bool logging_enabled = (log_flag != 0);
-
-    memset(&total_usage, 0, sizeof(total_usage));
-
-    if (logging_enabled) {
-        printk(KERN_INFO "RUSAGE_LOG: Subtree usage requested for PID %d with logging enabled.\n", pid);
-    }
-
-    rcu_read_lock();
-
-    p = find_task_by_vpid(pid);
-    if (!p) {
-        ret = -ESRCH; // No such process
-        goto out_unlock;
-    }
-
-    // Call traversal with logging enabled
-    __traverse_and_sum(p, &total_usage, logging_enabled);
-
-out_unlock:
-    rcu_read_unlock();
-
-    if (ret)
-        return ret;
-
-    // Copy result to user space
-    if (copy_to_user(usage, &total_usage, sizeof(total_usage))) {
-        return -EFAULT; // Bad user-space address
-    }
-
-    if (logging_enabled) {
-        printk(KERN_INFO "RUSAGE_LOG: Subtree traversal complete. Total UT: %ld.%06ld, ST: %ld.%06ld.\n",
-               (long)total_usage.ru_utime.tv_sec, (long)total_usage.ru_utime.tv_usec,
-               (long)total_usage.ru_stime.tv_sec, (long)total_usage.ru_stime.tv_usec);
-    }
-
-    return 0; // Success
-}
 ```
 
 ## Modify `arch/x86/entry/syscalls/syscall_64.tbl`
 
 ```bash
+cd $KERNEL_DIR
 cd arch/x86/entry/syscalls
 gedit syscall_64.tbl
 ```
 
 Add the following at the end of the file:
+
 ```
 470     common  get_proc_subtree_rusage sys_get_proc_subtree_rusage
-471     common  get_proc_subtree_rusage_log sys_get_proc_subtree_rusage_log
 ```
+
 **make sure the numbers are not used**
 
 ## Modify `include/linux/syscalls.h`
 
 ```bash
+cd $KERNEL_DIR
 cd include/linux
 gedit syscalls.h
 ```
 
 Add the following at the end of the file:
+
 ```c
 asmlinkage long sys_get_proc_subtree_rusage(pid_t pid, int flags, struct rusage __user *usage);
-
-asmlinkage long sys_get_proc_subtree_rusage_log(pid_t pid, int flags, int log_flag, struct rusage __user *usage);
-```
-
-## Install Essentials for Kernel Build
-
-```bash
-sudo apt update && sudo apt install -y build-essential bison flex libncurses-dev libelf-dev libssl-dev libdw-dev dwarves tar xz-utils util-linux
-```
-
-## Compile the kernel
-
-#### Get the old configuration
-
-```bash
-cp -v /boot/config-$(uname -r) .config
-```
-
-```bash
-make menuconfig
-```
-#### Optional Step: You can add your name as the kernel name
-
-```
-General setup  --->
-    () Local version - append to kernel release
-```
-Put something like
-```
--sayan
-```
-Save and exit.
-#### Edit the `.config` file
-
-```bash
-gedit .config
-```
-Look for `CONFIG_SYSTEM_TRUSTED_KEYS` and `CONFIG_SYSTEM_REVOCATION_KEYS` and edit them as follows
-```
-CONFIG_SYSTEM_TRUSTED_KEYS=""
-CONFIG_SYSTEM_REVOCATION_KEYS=""
-```
-#### Build the kernel
-```bash
-make -j$(nproc) 2>&1 | tee build.log
-```
-#### Install kernel modules
-```bash
-sudo make modules_install
-```
-#### Install the Kernel
-```bash
-sudo make install
 ```
 
 ## GRUB Menu Appearance Configuration
 
 File: `/etc/default/grub`
 
-
 ```bash
 sudo nano /etc/default/grub
-````
+```
 
 ```bash
-GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-60-generic"
+GRUB_DEFAULT=1
 GRUB_TIMEOUT_STYLE=menu
 GRUB_TIMEOUT=5
-````
+```
 
 Update GRUB after editing:
 
@@ -347,4 +248,70 @@ Reboot and boot up using the new kernel
 
 ```bash
 sudo reboot
+```
+
+## Install Essentials for Kernel Build
+
+```bash
+sudo apt update && sudo apt install -y build-essential bison flex libncurses-dev libelf-dev libssl-dev libdw-dev dwarves tar xz-utils util-linux
+```
+
+## Compile the kernel
+
+#### Return to root directory
+
+```bash
+cd $KERNEL_DIR
+```
+
+#### Get the old configuration
+
+```bash
+cp -v /boot/config-$(uname -r) .config
+```
+
+```bash
+make menuconfig
+```
+
+#### Optional Step: You can add your name as the kernel name
+
+```
+General setup  --->
+    () Local version - append to kernel release
+```
+
+Put something like `-sayan`
+
+Save and exit.
+
+#### Edit the `.config` file
+
+```bash
+gedit .config
+```
+
+Look for `CONFIG_SYSTEM_TRUSTED_KEYS` and `CONFIG_SYSTEM_REVOCATION_KEYS` and edit them as follows
+
+```
+CONFIG_SYSTEM_TRUSTED_KEYS=""
+CONFIG_SYSTEM_REVOCATION_KEYS=""
+```
+
+#### Build the kernel
+
+```bash
+make -j$(nproc) 2>&1 | tee build.log
+```
+
+#### Install kernel modules
+
+```bash
+sudo make modules_install
+```
+
+#### Install the Kernel
+
+```bash
+sudo make install
 ```
