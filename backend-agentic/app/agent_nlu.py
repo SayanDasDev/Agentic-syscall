@@ -24,29 +24,19 @@ KRUTRIM_MODEL = 'Qwen3-Next-80B-A3B-Instruct'
 
 # --- UPDATED SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
-You are an expert NLU (Natural Language Understanding) agent for a Streamlit app.
-Your sole purpose is to convert a user's command into a single-line JSON object.
-You do not chat. You do not explain. You ONLY output the JSON.
-
-Here are the possible intents:
-
-1.  **List User Processes:**
-    -   Triggers: "list my processes", "show me what's running", "ps -u", "show the process list"
-    -   JSON: {"intent": "list_processes"}
-
-2.  **Monitor PIDs (Multiple):**
-    -   Triggers: "monitor PID 12345", "watch 999 888 777", "update on 12345 and 45678 every 0.5s"
-    -   JSON: {"intent": "monitor_pids", "pids": [<pid1>, <pid2>, ...], "interval": <number_in_seconds>}
-    -   You MUST extract all PIDs.
-    -   Default 'interval' is 1.0 if not specified.
-
-3.  **Stop Monitoring:**
-    -   Triggers: "stop monitoring", "clear", "stop", "halt"
-    -   JSON: {"intent": "stop_monitoring"}
-
-4.  **Unknown/Error:**
-    -   Triggers: Any command that doesn't fit.
-    -   JSON: {"intent": "unknown", "message": "I didn't understand. Try 'list processes' or 'monitor <pid1> <pid2> ...'"}
+You are an NLU agent. Given a free-form request and a list of machines
+(each with a name and url), output a single-line JSON with keys:
+machine_name, machine_url, pid, interval.
+Rules:
+- machine_name must exactly match one entry from the provided machines list.
+- machine_url must be the corresponding url from the same machines list.
+- pid must be an integer extracted from the request.
+- interval is the sampling interval in seconds; default to 1.0 if missing.
+- Do not explain; only output JSON.
+Example:
+Request: "give me usage stats of process id 123 every 3 seconds of machine X"
+Machines: [{"name":"machine X","url":"localhost:8001"}]
+Output: {"machine_name":"machine X","machine_url":"localhost:8001","pid":123,"interval":3}
 """
 
 def parse_command_krutrim(user_input: str) -> dict:
@@ -132,3 +122,71 @@ def parse_command_mock(user_input: str) -> dict:
             return {"intent": "monitor_pids", "pids": pids, "interval": interval}
 
     return {"intent": "unknown", "message": "I didn't understand. Try 'list processes' or 'monitor <pid>'."}
+
+def parse_agentic_selection(user_input: str, machines: list[dict]) -> dict:
+    if not KRUTRIM_API_KEY:
+        return parse_agentic_mock(user_input, machines)
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {KRUTRIM_API_KEY}'
+    }
+    machines_str = json.dumps(machines, ensure_ascii=False)
+    payload = {
+        'model': KRUTRIM_MODEL,
+        'messages': [
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': f"Machines: {machines_str}\nRequest: {user_input}"}
+        ],
+        'stream': False
+    }
+    try:
+        response = requests.post(KRUTRIM_API_URL, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        out = data['choices'][0]['message']['content']
+        parsed = json.loads(out)
+        if not isinstance(parsed.get('pid'), int):
+            raise ValueError('pid missing')
+        if 'interval' not in parsed:
+            parsed['interval'] = 1.0
+        mname = parsed.get('machine_name')
+        murl = parsed.get('machine_url')
+        if not mname or not murl:
+            table = {str(x.get('name','')): str(x.get('url','')) for x in machines}
+            if not mname and table:
+                mname = list(table.keys())[0]
+            if not murl and mname in table:
+                murl = table[mname]
+            parsed['machine_name'] = mname
+            parsed['machine_url'] = murl
+        return parsed
+    except Exception:
+        return parse_agentic_mock(user_input, machines)
+
+def parse_agentic_mock(user_input: str, machines: list[dict]) -> dict:
+    lowered = user_input.lower()
+    pids = [int(p) for p in re.findall(r'\b\d+\b', user_input)]
+    pid = pids[0] if pids else 0
+    m = re.search(r'every\s+(\d+(?:\.\d+)?)\s*(seconds?|secs?|s)\b', lowered)
+    interval = 1.0
+    if m:
+        try:
+            interval = float(m.group(1))
+        except ValueError:
+            interval = 1.0
+    else:
+        m2 = re.search(r'every\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|m)\b', lowered)
+        if m2:
+            try:
+                interval = float(m2.group(1)) * 60.0
+            except ValueError:
+                interval = 60.0
+    machine_names = [str(x.get('name','')) for x in machines]
+    name_to_url = {str(x.get('name','')): str(x.get('url','')) for x in machines}
+    chosen = machine_names[0] if machine_names else ''
+    for name in machine_names:
+        if name and name.lower() in lowered:
+            chosen = name
+            break
+    url = name_to_url.get(chosen, '')
+    return {"machine_name": chosen, "machine_url": url, "pid": pid, "interval": interval}

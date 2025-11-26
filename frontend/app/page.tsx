@@ -47,6 +47,9 @@ export default function Home() {
   const [agentState, setAgentState] = useState("idle");
   const [text, setText] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
+  const [machines, setMachines] = useState<{ name: string; url: string }[]>([]);
+  const [newName, setNewName] = useState("");
+  const [newUrl, setNewUrl] = useState("");
 
   useEffect(() => {
     const globalObj = typeof window !== "undefined" ? (window as any) : {};
@@ -66,8 +69,24 @@ export default function Home() {
           setAgentState("error");
           return;
         }
+        if (data && data.type === "usage" && data.data) {
+          const first = data.data;
+          const ut = first.user_time ?? 0;
+          const st = first.sys_time ?? 0;
+          const usage: Usage = {
+            ru_utime: { tv_sec: Math.floor(ut), tv_usec: Math.floor((ut % 1) * 1_000_000) },
+            ru_stime: { tv_sec: Math.floor(st), tv_usec: Math.floor((st % 1) * 1_000_000) },
+            ru_maxrss: first.max_rss_kb ?? 0,
+            ru_minflt: first.minor_page_faults ?? 0,
+            ru_majflt: first.major_page_faults ?? 0,
+            ts: data.ts ?? Date.now() / 1000,
+          };
+          setHistory((prev) => [...prev.slice(-59), usage]);
+          if (agentState === "thinking") setAgentState("streaming");
+          return;
+        }
         if (data && data.type === "batch" && data.data) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          
           const first = Object.values<any>(data.data)[0];
           if (first) {
             const ut = first.user_time ?? 0;
@@ -107,13 +126,13 @@ export default function Home() {
     const t = text.trim();
     if (!t) return;
     setAgentState("thinking");
-    wsRef.current.send(t);
+    wsRef.current.send(JSON.stringify({ query: t, machines }));
   };
 
   const stopStreaming = () => {
     if (!wsRef.current || status !== "connected") return;
     setAgentState("thinking");
-    wsRef.current.send("stop");
+    wsRef.current.send(JSON.stringify({ type: "stop" }));
     setTimeout(() => setAgentState("stopped"), 400);
   };
 
@@ -154,6 +173,35 @@ export default function Home() {
                 />
                 <Button onClick={sendText}>Send</Button>
                 <Button variant="secondary" onClick={stopStreaming}>Stop</Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Machines</CardTitle>
+              <CardDescription>Provide machine name and URL for agent selection</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-col gap-3">
+                {machines.map((m, idx) => (
+                  <div key={`${m.name}-${idx}`} className="flex gap-2">
+                    <Input value={m.name} onChange={(e) => {
+                      const v = e.target.value; setMachines((prev) => prev.map((pm, i) => i===idx ? { ...pm, name: v } : pm));
+                    }} placeholder="Machine name" />
+                    <Input value={m.url} onChange={(e) => {
+                      const v = e.target.value; setMachines((prev) => prev.map((pm, i) => i===idx ? { ...pm, url: v } : pm));
+                    }} placeholder="URL (host:port)" />
+                    <Button variant="outline" onClick={() => setMachines((prev) => prev.filter((_, i) => i!==idx))}>Remove</Button>
+                  </div>
+                ))}
+                <div className="flex gap-2">
+                  <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Machine name" />
+                  <Input value={newUrl} onChange={(e) => setNewUrl(e.target.value)} placeholder="URL (host:port)" />
+                  <Button onClick={() => {
+                    const nn = newName.trim(); const nu = newUrl.trim(); if (!nn || !nu) return; setMachines((prev) => [...prev, { name: nn, url: nu }]); setNewName(""); setNewUrl("");
+                  }}>Add machine</Button>
+                </div>
               </div>
             </CardContent>
           </Card>
